@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "urirun-connector-invoice"
+version = "0.1.0"
+description = "Invoice field-extraction connector for ifuri and urirun (invoice://)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "if-uri" }]
+dependencies = ["urirun>=0.4.14"]
+
+[project.optional-dependencies]
+llm = ["litellm>=1.0"]
+test = ["pytest>=8"]
+
+[project.urls]
+Homepage = "https://connect.ifuri.com/connectors/invoice"
+Repository = "https://github.com/if-uri/urirun-connector-invoice"
+
+[project.scripts]
+urirun-invoice = "urirun_connector_invoice.core:main"
+
+[project.entry-points."urirun.bindings"]
+invoice = "urirun_connector_invoice.core:urirun_bindings"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["urirun_connector_invoice*"]
+
+[tool.setuptools.package-data]
+urirun_connector_invoice = ["connector.manifest.json"]
