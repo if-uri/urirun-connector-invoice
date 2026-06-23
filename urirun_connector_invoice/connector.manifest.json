@@ -1,12 +1,70 @@
 {
   "id": "invoice",
   "name": "Invoice field extraction",
-  "uriSchemes": ["invoice"],
+  "uriSchemes": [
+    "invoice"
+  ],
   "status": "available",
   "category": "Accounting",
   "summary": "Extract structured fields from invoices over invoice:// URIs — NIP, number, dates, net/VAT/gross, seller, currency. Regex tuned for Polish faktura (also EN), text via pdftotext, optional LLM (OpenRouter) fallback. A folder route batches a month of invoices into a CSV with net/VAT/gross totals.",
   "description": "invoice:// turns invoice parsing into a first-class URI. invoice://host/file/query/parse returns structured fields {nip, number, issueDate, seller, net, vat, gross, currency} from one PDF/text — regex-first (text-layer PDFs via pdftotext), with an optional LLM pass (OpenRouter via litellm, use_llm=true) for layouts the regex misses. invoice://host/folder/query/audit parses every invoice under a folder into rows plus net/VAT/gross totals, optionally writing a CSV — for monthly accounting. Read-only over the invoice files. Pairs with doc:// (OCR for scans) and fs:// (dedupe) in the office flow.",
-  "requires": {"system": ["pdftotext (poppler) for text-layer PDFs"], "python": ["urirun"], "optional": ["litellm + OPENROUTER_API_KEY for the LLM fallback", "doc:// OCR for scanned invoices"]},
-  "keywords": ["invoice", "faktura", "nip", "vat", "accounting", "ksiegowosc", "ocr", "extraction"],
-  "publisher": "if-uri"
+  "requires": {
+    "system": [
+      "pdftotext (poppler) for text-layer PDFs"
+    ],
+    "python": [
+      "urirun"
+    ],
+    "optional": [
+      "litellm + OPENROUTER_API_KEY for the LLM fallback",
+      "doc:// OCR for scanned invoices"
+    ]
+  },
+  "keywords": [
+    "invoice",
+    "faktura",
+    "nip",
+    "vat",
+    "accounting",
+    "ksiegowosc",
+    "ocr",
+    "extraction"
+  ],
+  "publisher": {
+    "name": "if-uri",
+    "url": "https://ifuri.com",
+    "github": "https://github.com/if-uri"
+  },
+  "routes": [
+    "invoice://host/file/query/parse",
+    "invoice://host/folder/query/audit"
+  ],
+  "useCases": [
+    "Extract NIP, dates and net/VAT/gross from one invoice.",
+    "Audit a folder of invoices into rows plus monthly totals.",
+    "Feed parsed rows into a spreadsheet for accounting."
+  ],
+  "examples": [
+    {
+      "title": "Parse one invoice",
+      "uri": "invoice://host/file/query/parse",
+      "payload": {
+        "path": "/faktury/2026-06/FV-1.pdf"
+      }
+    },
+    {
+      "title": "Audit a folder",
+      "uri": "invoice://host/folder/query/audit",
+      "payload": {
+        "root": "/faktury/2026-06",
+        "csv": true
+      }
+    }
+  ],
+  "provenance": "verified",
+  "docsUrl": "https://github.com/if-uri/urirun-connector-invoice",
+  "install": {
+    "mode": "urirun-extra",
+    "pipSpec": "urirun-connector-invoice @ git+https://github.com/if-uri/urirun-connector-invoice.git@v0.1.0"
+  }
 }
