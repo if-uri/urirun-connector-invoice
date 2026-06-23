@@ -273,3 +273,13 @@ def test_ledger_list_filters_and_missing(tmp_path):
     # missing file → ok, exists False, no crash
     m = c.ledger_list(path=str(tmp_path / "none.jsonl"))
     assert m["ok"] and m["exists"] is False and m["count"] == 0
+
+
+def test_invoice_artifacts_are_static():
+    import json as _j
+    d = c.receipt_draft(receipt_json='{"total": 10.0, "nip": "7781422455", "items": []}')
+    assert d["kind"] == "invoice-draft" and d["live"] is False
+    b = c.ksef_build(draft_json=_j.dumps(d["draft"]), number="F1")
+    assert b["kind"] == "invoice-xml" and b["live"] is False
+    u = c.ksef_upo(text='{"ksefReferenceNumber":"K-1"}')
+    assert u["kind"] == "upo" and u["live"] is False

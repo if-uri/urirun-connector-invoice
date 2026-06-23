@@ -34,7 +34,8 @@ def _ledger(event: str, **fields: Any) -> None:
     if path.lower() in ("0", "off", "none", ""):
         return
     try:
-        rec = {"ts": time.time(), "connector": CONNECTOR_ID, "event": event, **fields}
+        rec = {"ts": time.time(), "connector": CONNECTOR_ID, "event": event,
+               "live": False, **fields}  # ledger only holds frozen artifacts, never widgets
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -414,8 +415,8 @@ def receipt_draft(text: str = "", receipt_json: str = "", path: str = "", vat_ra
         notes.append("no total/gross found — set items or total")
     if items_sum is not None and gross is not None and abs(items_sum - gross) > 0.02:
         notes.append(f"items sum {items_sum} != gross {gross}")
-    return {"ok": gross is not None, "connector": CONNECTOR_ID, "draft": draft,
-            "fields": fields, "notes": notes}
+    return {"ok": gross is not None, "connector": CONNECTOR_ID, "kind": "invoice-draft", "live": False,
+            "draft": draft, "fields": fields, "notes": notes}
 
 
 # --- KSeF FA(2) XML generation (build an e-invoice draft the API connector can submit) ----
@@ -545,7 +546,7 @@ def ksef_build(draft_json: str = "", text: str = "", receipt_json: str = "", vat
     _ledger("ksef_build", gross=draft.get("gross"), nip=draft.get("sellerNip"),
             number=draft.get("number") or number, currency=draft.get("currency"), path=written)
     return {"ok": bool(draft.get("gross") is not None and draft.get("sellerNip")),
-            "connector": CONNECTOR_ID, "formCode": "FA", "variant": "2",
+            "connector": CONNECTOR_ID, "kind": "invoice-xml", "live": False, "formCode": "FA", "variant": "2",
             "xml": xml, "path": written, "draft": draft, "parsed": parsed}
 
 
@@ -705,7 +706,7 @@ def _parse_upo(data: str) -> dict[str, Any]:
             return {"ok": False, "error": "UPO is neither valid JSON nor XML", "format": fmt}
     out["nip"] = _norm_nip(out.get("nip")) if out.get("nip") else None
     return {"ok": bool(out.get("ksefNumber") or out.get("referenceNumber")),
-            "connector": CONNECTOR_ID, "format": fmt, **out}
+            "connector": CONNECTOR_ID, "kind": "upo", "live": False, "format": fmt, **out}
 
 
 @INVOICE.handler("ksef/query/upo", isolated=True,
