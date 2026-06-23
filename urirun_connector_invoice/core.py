@@ -168,7 +168,7 @@ def parse(path: str = "", text: str = "", use_llm: bool = False,
             method = "regex+llm"
     fields["nip"] = _norm_nip(fields.get("nip"))
     return {"ok": bool(fields.get("nip") or fields.get("number") or fields.get("gross")),
-            "connector": CONNECTOR_ID, "path": path, "method": method, "fields": fields}
+            "connector": CONNECTOR_ID, "kind": "invoice", "live": False, "path": path, "method": method, "fields": fields}
 
 
 @INVOICE.handler("folder/query/audit", isolated=True,
@@ -208,7 +208,7 @@ def audit(root: str = "", extensions: str = "pdf", recursive: bool = True, use_l
         csv_written = output_csv
     buf = io.StringIO()
     csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore").writeheader()
-    return {"ok": True, "connector": CONNECTOR_ID, "root": root, "invoices": len(rows),
+    return {"ok": True, "connector": CONNECTOR_ID, "kind": "audit", "live": False, "root": root, "invoices": len(rows),
             "parsed": sum(1 for r in rows if r.get("ok")),
             "totals": {k: round(v, 2) for k, v in totals.items()},
             "csv": csv_written, "rows": rows[:300]}
@@ -293,7 +293,7 @@ def ksef_parse(path: str = "", xml: str = "") -> dict[str, Any]:
     except _ET.ParseError as exc:
         return {"ok": False, "error": f"not valid XML: {exc}", "path": path}
     return {"ok": bool(fields.get("number") or (fields.get("seller") or {}).get("nip")),
-            "connector": CONNECTOR_ID, "path": path, "fields": fields}
+            "connector": CONNECTOR_ID, "kind": "invoice", "live": False, "path": path, "fields": fields}
 
 
 @INVOICE.handler("ksef/folder/register", isolated=True,
@@ -343,7 +343,7 @@ def ksef_register(root: str = "", recursive: bool = True, output_csv: str = "", 
             w.writeheader()
             w.writerows(rows)
         csv_written = output_csv
-    return {"ok": True, "connector": CONNECTOR_ID, "root": root, "invoices": len(rows),
+    return {"ok": True, "connector": CONNECTOR_ID, "kind": "register", "live": False, "root": root, "invoices": len(rows),
             "totals": {k: round(v, 2) for k, v in totals.items()},
             "byRate": {r: {k: round(x, 2) for k, x in v.items()} for r, v in by_rate.items()},
             "csv": csv_written, "rows": rows[:300]}
@@ -632,11 +632,11 @@ def ksef_validate(xml: str = "", path: str = "", xsd_path: str = "") -> dict[str
             return {"ok": False, "error": f"schema/XML load failed: {exc}", "connector": CONNECTOR_ID, "schema": xsd}
         valid = bool(schema.validate(doc))
         errors = [f"line {e.line}: {e.message}" for e in schema.error_log]
-        return {"ok": True, "connector": CONNECTOR_ID, "valid": valid, "checkedWith": "xsd",
+        return {"ok": True, "connector": CONNECTOR_ID, "kind": "validation", "live": False, "valid": valid, "checkedWith": "xsd",
                 "schema": xsd, "errors": errors, "errorCount": len(errors)}
 
     errors, warnings = _structural_validate(data)
-    return {"ok": True, "connector": CONNECTOR_ID, "valid": not errors, "checkedWith": "structural",
+    return {"ok": True, "connector": CONNECTOR_ID, "kind": "validation", "live": False, "valid": not errors, "checkedWith": "structural",
             "errors": errors, "warnings": warnings,
             "note": "no FA(2) XSD given (set xsd_path or KSEF_FA2_XSD) — only structural/arithmetic checks ran"}
 
@@ -767,7 +767,7 @@ def ledger_list(path: str = "", limit: int = 50, event: str = "", connector: str
                     continue
                 rows.append(rec)
     except OSError:
-        return {"ok": True, "connector": CONNECTOR_ID, "path": src, "exists": False,
+        return {"ok": True, "connector": CONNECTOR_ID, "kind": "ledger", "live": False, "path": src, "exists": False,
                 "count": 0, "summary": {}, "rows": []}
 
     counts: dict[str, int] = {}
@@ -790,7 +790,7 @@ def ledger_list(path: str = "", limit: int = 50, event: str = "", connector: str
                "grossBuilt": round(gross_sum, 2),
                "ksefConfirmed": len(ksef_numbers), "ksefNumbers": ksef_numbers[-20:]}
     recent = sorted(rows, key=lambda r: r.get("ts") or 0, reverse=True)[: max(1, int(limit))]
-    return {"ok": True, "connector": CONNECTOR_ID, "path": src, "exists": True,
+    return {"ok": True, "connector": CONNECTOR_ID, "kind": "ledger", "live": False, "path": src, "exists": True,
             "count": len(rows), "summary": summary, "rows": recent}
 
 
