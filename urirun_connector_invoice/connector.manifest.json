@@ -37,11 +37,14 @@
   },
   "routes": [
     "invoice://host/file/query/parse",
-    "invoice://host/folder/query/audit"
+    "invoice://host/folder/query/audit",
+    "invoice://host/ksef/folder/register",
+    "invoice://host/ksef/query/parse"
   ],
   "useCases": [
     "Extract NIP, dates and net/VAT/gross from one invoice.",
     "Audit a folder of invoices into rows plus monthly totals.",
+    "Parse KSeF FA_VAT XML into exact fields and a per-rate VAT register (JPK).",
     "Feed parsed rows into a spreadsheet for accounting."
   ],
   "examples": [
@@ -66,5 +69,8 @@
   "install": {
     "mode": "urirun-extra",
     "pipSpec": "urirun-connector-invoice @ git+https://github.com/if-uri/urirun-connector-invoice.git@v0.1.0"
-  }
+  },
+  "adapterKinds": [
+    "local-function"
+  ]
 }
