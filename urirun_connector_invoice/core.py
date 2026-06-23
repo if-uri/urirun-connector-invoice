@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 import re
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from typing import Any
 
 import urirun
@@ -23,8 +25,25 @@ import urirun
 CONNECTOR_ID = "invoice"
 INVOICE = urirun.connector(CONNECTOR_ID, scheme="invoice", target="host", meta={"label": "Invoice field extraction"})
 
+
+def _ledger(event: str, **fields: Any) -> None:
+    """Best-effort append of one transaction line to the shared ledger (env URIRUN_LEDGER,
+    default ~/.urirun/ledger.jsonl; 0/off disables). Never raises; logs no secrets."""
+    import time
+    path = os.getenv("URIRUN_LEDGER", os.path.expanduser("~/.urirun/ledger.jsonl"))
+    if path.lower() in ("0", "off", "none", ""):
+        return
+    try:
+        rec = {"ts": time.time(), "connector": CONNECTOR_ID, "event": event, **fields}
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001 - telemetry must never break a route
+        pass
+
 # --- Polish-invoice patterns (also catch common EN labels) -----------------------------
-_NIP_RE = re.compile(r"NIP[:\s]*([A-Z]{0,2}\s?\d[\d\s\-]{8,13}\d)", re.I)
+# inner class excludes newline so a number on the *next* line can't bleed into the NIP
+_NIP_RE = re.compile(r"NIP[:\s]*([A-Z]{0,2}[ \t]?\d[\d \t\-]{8,13}\d)", re.I)
 _NUM_RE = re.compile(r"(?:faktura(?:\s+(?:nr|vat|nr\.?))?|invoice(?:\s+no)?|nr\s+faktury|FV|FS|FVS)[:\s/]*"
                      r"([A-Z]{0,4}[\w./\-]*\d[\w./\-]*)", re.I)
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2}|\d{1,2}[.\-/]\d{1,2}[.\-/]\d{4})")
@@ -33,7 +52,9 @@ _ISSUE_RE = re.compile(r"(?:data\s+wystawienia|wystawiono|date\s+of\s+issue|issu
 _SELLER_RE = re.compile(r"(?:sprzedawca|seller|sprzedaj[ąa]cy)[:\s]*\n?\s*(.+)", re.I)
 # a money amount needs a 2-digit minor part (",00" / ".00") — skips years, percents, NIPs
 _AMOUNT = r"([0-9][0-9\s .]*[.,][0-9]{2})\b"
-_GROSS_RE = re.compile(r"(?:do\s+zap[łl]aty|razem\s+do\s+zap[łl]aty|brutto|gross|total|suma)[:\s]*" + _AMOUNT, re.I)
+# the currency token may sit between the label and the amount ("SUMA PLN 29,90", "Razem PLN ...")
+_GROSS_RE = re.compile(r"(?:do\s+zap[łl]aty|razem\s+do\s+zap[łl]aty|brutto|gross|total|suma|razem)[:\s]*"
+                       r"(?:PLN|EUR|USD|GBP|z[łl])?\s*" + _AMOUNT, re.I)
 _NET_RE = re.compile(r"(?:netto|net)\s*[:\s]*" + _AMOUNT, re.I)
 _VAT_RE = re.compile(r"(?:VAT|podatek)(?:\s*\d{1,2}\s*%)?[:\s]*" + _AMOUNT, re.I)
 _CCY_RE = re.compile(r"\b(PLN|EUR|USD|GBP|z[łl])\b", re.I)
@@ -325,6 +346,451 @@ def ksef_register(root: str = "", recursive: bool = True, output_csv: str = "", 
             "totals": {k: round(v, 2) for k, v in totals.items()},
             "byRate": {r: {k: round(x, 2) for k, x in v.items()} for r, v in by_rate.items()},
             "csv": csv_written, "rows": rows[:300]}
+
+
+@INVOICE.handler("receipt/query/draft", isolated=True,
+                 meta={"label": "Build an invoice draft from a receipt (paragon)", "cliAlias": "receipt-draft"})
+def receipt_draft(text: str = "", receipt_json: str = "", path: str = "", vat_rate: float = 23.0,
+                  seller: str = "", buyer_nip: str = "", number: str = "", currency: str = "",
+                  use_llm: bool = False,
+                  model: str = "openrouter/google/gemini-3.1-flash-image-preview") -> dict[str, Any]:
+    """Turn a receipt ('paragon') into an invoice draft — the bridge from
+    camera://host/receipt/query/parse into the invoice/KSeF flow. Accepts the camera
+    parser's JSON (`receipt_json` with items/total/nip/date/currency), raw OCR `text`, or a
+    `path`. Reuses the invoice field extractor for nip/number/dates/seller/gross, derives
+    net+VAT from gross at `vat_rate` (default 23%), and returns a KSeF-ready draft."""
+    receipt: dict[str, Any] = {}
+    if receipt_json:
+        try:
+            loaded = json.loads(receipt_json)
+            receipt = loaded if isinstance(loaded, dict) else {}
+        except json.JSONDecodeError as exc:
+            return {"ok": False, "error": f"invalid receipt_json: {exc}", "connector": CONNECTOR_ID}
+
+    body = text or (str(receipt.get("text") or "")) or (_pdf_text(os.path.expanduser(path)) if path else "")
+    fields = _regex_fields(body) if body.strip() else {
+        "nip": None, "number": None, "issueDate": None, "seller": None,
+        "net": None, "vat": None, "gross": None, "currency": None,
+    }
+    if use_llm and body.strip() and not (fields.get("nip") and fields.get("gross")):
+        llm = _llm_fields(body, model)
+        if llm:
+            for k, v in llm.items():
+                if v not in (None, "") and not fields.get(k):
+                    fields[k] = v
+
+    items = receipt.get("items") if isinstance(receipt.get("items"), list) else []
+    items_sum = round(sum(float(i.get("price") or 0) for i in items), 2) if items else None
+    gross = fields.get("gross")
+    if gross is None:
+        gross = receipt.get("total") if isinstance(receipt.get("total"), (int, float)) else items_sum
+
+    net, vat = fields.get("net"), fields.get("vat")
+    rate = float(vat_rate or 0)
+    if gross is not None and (net is None or vat is None) and rate > 0:
+        net = round(gross / (1 + rate / 100.0), 2)
+        vat = round(gross - net, 2)
+
+    nip = _norm_nip(fields.get("nip") or receipt.get("nip"))
+    draft = {
+        "type": "invoice-draft",
+        "source": "receipt",
+        "number": _clean_number(number) or fields.get("number"),
+        "issueDate": fields.get("issueDate") or receipt.get("date"),
+        "seller": (seller or fields.get("seller")),
+        "sellerNip": nip,
+        "buyerNip": _norm_nip(buyer_nip) if buyer_nip else None,
+        "currency": (currency or fields.get("currency") or receipt.get("currency") or "PLN").upper(),
+        "vatRate": rate,
+        "items": items,
+        "itemsSum": items_sum,
+        "net": net,
+        "vat": vat,
+        "gross": gross,
+        "ksefReady": bool(nip and gross is not None),
+    }
+    notes = []
+    if gross is None:
+        notes.append("no total/gross found — set items or total")
+    if items_sum is not None and gross is not None and abs(items_sum - gross) > 0.02:
+        notes.append(f"items sum {items_sum} != gross {gross}")
+    return {"ok": gross is not None, "connector": CONNECTOR_ID, "draft": draft,
+            "fields": fields, "notes": notes}
+
+
+# --- KSeF FA(2) XML generation (build an e-invoice draft the API connector can submit) ----
+# We emit the FA(2) structure (namespace + Naglowek/Podmiot1/Podmiot2/Fa/FaWiersz) that
+# _parse_fa_vat reads back exactly. It is a DRAFT: it is not XSD-validated here, so validate
+# against the official FA(2) schema before sending it to the real KSeF API.
+_FA2_NS = "http://crd.gov.pl/wzor/2023/06/29/12648/"
+_RATE_INDEX = {23: "1", 8: "2", 5: "3", 0: "6"}  # P_13_x / P_14_x slot per VAT rate
+
+
+def _q2(x: Any) -> str:
+    return f"{round(float(x), 2):.2f}"
+
+
+def _build_fa2_xml(draft: dict[str, Any], *, system_info: str = "ifURI",
+                   created_at: str = "", sale_date: str = "", number: str = "",
+                   seller_address: str = "", buyer_address: str = "") -> str:
+    """Serialise an invoice draft into KSeF FA(2) XML, including the mandatory Adnotacje
+    block and party addresses so it is structurally complete (still validate vs the XSD)."""
+    def E(parent, tag, text=None, **attrs):
+        el = _ET.SubElement(parent, f"{{{_FA2_NS}}}{tag}", **attrs)
+        if text is not None:
+            el.text = str(text)
+        return el
+
+    _ET.register_namespace("", _FA2_NS)
+    root = _ET.Element(f"{{{_FA2_NS}}}Faktura")
+    nag = E(root, "Naglowek")
+    E(nag, "KodFormularza", "FA", kodSystemowy="FA (2)", wersjaSchemy="1-0E")
+    E(nag, "WariantFormularza", "2")
+    E(nag, "DataWytworzeniaFa", created_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    E(nag, "SystemInfo", system_info)
+
+    p1 = E(root, "Podmiot1")
+    did1 = E(p1, "DaneIdentyfikacyjne")
+    E(did1, "NIP", draft.get("sellerNip") or "0000000000")
+    E(did1, "Nazwa", draft.get("seller") or "Sprzedawca")
+    adr1 = E(p1, "Adres")
+    E(adr1, "KodKraju", "PL")
+    E(adr1, "AdresL1", seller_address or "ul. Przykładowa 1, 00-001 Miasto")
+    p2 = E(root, "Podmiot2")
+    did2 = E(p2, "DaneIdentyfikacyjne")
+    E(did2, "NIP", draft.get("buyerNip") or "9999999999")
+    E(did2, "Nazwa", draft.get("buyer") or "Nabywca")
+    adr2 = E(p2, "Adres")
+    E(adr2, "KodKraju", "PL")
+    E(adr2, "AdresL1", buyer_address or "ul. Nabywcza 2, 00-002 Miasto")
+
+    fa = E(root, "Fa")
+    E(fa, "KodWaluty", draft.get("currency") or "PLN")
+    E(fa, "P_1", draft.get("issueDate") or datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    E(fa, "P_2", number or draft.get("number") or "DRAFT")
+    E(fa, "P_6", sale_date or draft.get("issueDate") or "")
+    rate = int(round(float(draft.get("vatRate") or 23)))
+    idx = _RATE_INDEX.get(rate, "1")
+    if draft.get("net") is not None:
+        E(fa, f"P_13_{idx}", _q2(draft["net"]))
+    if draft.get("vat") is not None:
+        E(fa, f"P_14_{idx}", _q2(draft["vat"]))
+    if draft.get("gross") is not None:
+        E(fa, "P_15", _q2(draft["gross"]))
+    # Adnotacje is mandatory in FA(2); set every flag to 2 ("nie") / "brak" by default.
+    adn = E(fa, "Adnotacje")
+    E(adn, "P_16", "2")
+    E(adn, "P_17", "2")
+    E(adn, "P_18", "2")
+    E(adn, "P_18A", "2")
+    zw = E(adn, "Zwolnienie")
+    E(zw, "P_19N", "1")
+    nst = E(adn, "NoweSrodkiTransportu")
+    E(nst, "P_22N", "1")
+    E(adn, "P_23", "2")
+    pm = E(adn, "PMarzy")
+    E(pm, "P_PMarzyN", "1")
+    E(fa, "RodzajFaktury", "VAT")
+
+    for i, item in enumerate(draft.get("items") or [], start=1):
+        gross_line = float(item.get("price") or 0)
+        net_line = round(gross_line / (1 + rate / 100.0), 2) if rate else gross_line
+        w = E(fa, "FaWiersz")
+        E(w, "NrWierszaFa", str(i))
+        E(w, "P_7", str(item.get("name") or f"Pozycja {i}"))
+        E(w, "P_8B", "1")
+        E(w, "P_9A", _q2(net_line))
+        E(w, "P_11", _q2(net_line))
+        E(w, "P_12", str(rate))
+
+    return _ET.tostring(root, encoding="unicode")
+
+
+@INVOICE.handler("ksef/query/build", isolated=True,
+                 meta={"label": "Build a KSeF FA(2) XML draft from an invoice/receipt", "cliAlias": "ksef-build"})
+def ksef_build(draft_json: str = "", text: str = "", receipt_json: str = "", vat_rate: float = 23.0,
+               seller: str = "", buyer_nip: str = "", number: str = "", currency: str = "",
+               output_path: str = "", system_info: str = "ifURI", created_at: str = "",
+               sale_date: str = "", seller_address: str = "", buyer_address: str = "") -> dict[str, Any]:
+    """Build a KSeF **FA(2) XML draft** from an invoice draft (`draft_json` from
+    invoice://host/receipt/query/draft) or straight from a receipt (`receipt_json`/`text`).
+    Completes the office chain: paragon → draft → FA(2) XML the ksef:// API connector submits.
+    Optionally writes the XML to `output_path`. NOTE: a draft — validate against the official
+    FA(2) XSD before real submission. Re-parses its own output so `parsed` mirrors `ksef_parse`."""
+    if draft_json:
+        try:
+            loaded = json.loads(draft_json)
+        except json.JSONDecodeError as exc:
+            return {"ok": False, "error": f"invalid draft_json: {exc}", "connector": CONNECTOR_ID}
+        draft = loaded.get("draft") if isinstance(loaded, dict) and "draft" in loaded else loaded
+    else:
+        built = receipt_draft(text=text, receipt_json=receipt_json, vat_rate=vat_rate,
+                              seller=seller, buyer_nip=buyer_nip, number=number, currency=currency)
+        if not built.get("ok"):
+            return built
+        draft = built["draft"]
+    if not isinstance(draft, dict):
+        return {"ok": False, "error": "draft must be an object", "connector": CONNECTOR_ID}
+
+    xml = _build_fa2_xml(draft, system_info=system_info, created_at=created_at,
+                         sale_date=sale_date, number=number,
+                         seller_address=seller_address, buyer_address=buyer_address)
+    written = None
+    if output_path:
+        written = os.path.expanduser(output_path)
+        os.makedirs(os.path.dirname(os.path.abspath(written)) or ".", exist_ok=True)
+        with open(written, "w", encoding="utf-8") as fh:
+            fh.write(xml)
+    parsed = _parse_fa_vat(xml)
+    _ledger("ksef_build", gross=draft.get("gross"), nip=draft.get("sellerNip"),
+            number=draft.get("number") or number, currency=draft.get("currency"), path=written)
+    return {"ok": bool(draft.get("gross") is not None and draft.get("sellerNip")),
+            "connector": CONNECTOR_ID, "formCode": "FA", "variant": "2",
+            "xml": xml, "path": written, "draft": draft, "parsed": parsed}
+
+
+# --- KSeF FA(2) validation (structural always; full XSD when an official schema is given) ---
+# Required top-level / Fa elements for a structurally complete FA(2). The authoritative check
+# is the official XSD (set xsd_path / KSEF_FA2_XSD); these catch the common omissions offline.
+_FA2_REQUIRED_TOP = ["Naglowek", "Podmiot1", "Podmiot2", "Fa"]
+_FA2_REQUIRED_FA = ["KodWaluty", "P_1", "P_2", "P_15", "Adnotacje", "RodzajFaktury"]
+
+
+def _structural_validate(data) -> tuple[list[str], list[str]]:
+    """Offline structural + arithmetic checks for a FA(2) document. Returns (errors, warnings)."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    try:
+        root = _ET.fromstring(data)
+    except _ET.ParseError as exc:
+        return [f"not well-formed XML: {exc}"], []
+    if _FA2_NS not in (root.tag or "") and not any(_FA2_NS in (e.tag or "") for e in root.iter()):
+        warnings.append(f"FA(2) namespace {_FA2_NS} not found — wrong schema version?")
+    if _ln(root.tag) != "Faktura":
+        errors.append(f"root element is <{_ln(root.tag)}>, expected <Faktura>")
+    for name in _FA2_REQUIRED_TOP:
+        if _sub(root, name) is None:
+            errors.append(f"missing required <{name}>")
+    fa = _sub(root, "Fa")
+    for name in _FA2_REQUIRED_FA:
+        if fa is not None and _txt(fa, name) is None and _sub(fa, name) is None:
+            errors.append(f"missing required <Fa>/<{name}>")
+    for party in ("Podmiot1", "Podmiot2"):
+        node = _sub(root, party)
+        if node is not None:
+            if _txt(node, "NIP") is None:
+                errors.append(f"<{party}> missing NIP")
+            if _sub(node, "Adres") is None:
+                warnings.append(f"<{party}> has no <Adres> (FA(2) requires an address)")
+    # arithmetic: P_13_x + P_14_x == P_15
+    if fa is not None:
+        net = vat = None
+        for el in fa.iter():
+            ln = _ln(el.tag)
+            if ln.startswith("P_13_") and el.text:
+                net = (net or 0) + (_xnum(el.text) or 0)
+            elif ln.startswith("P_14_") and el.text:
+                vat = (vat or 0) + (_xnum(el.text) or 0)
+        gross = _xnum(_txt(fa, "P_15"))
+        if net is not None and vat is not None and gross is not None and abs(round(net + vat, 2) - gross) > 0.02:
+            errors.append(f"net+VAT ({round(net + vat, 2)}) != P_15 gross ({gross})")
+    nip = _txt(_sub(root, "Podmiot1"), "NIP") if _sub(root, "Podmiot1") is not None else None
+    if nip and len(re.sub(r'\D', '', nip)) != 10:
+        warnings.append(f"seller NIP '{nip}' is not 10 digits")
+    return errors, warnings
+
+
+@INVOICE.handler("ksef/query/validate", isolated=True,
+                 meta={"label": "Validate a KSeF FA(2) XML (XSD when given, else structural)", "cliAlias": "ksef-validate"})
+def ksef_validate(xml: str = "", path: str = "", xsd_path: str = "") -> dict[str, Any]:
+    """Validate a KSeF FA(2) XML (`xml` or `path`). With an official FA(2) schema —
+    `xsd_path` or env KSEF_FA2_XSD — runs a full XSD validation via lxml. Otherwise runs
+    offline structural + arithmetic checks (required elements, party NIP/address, net+VAT==gross)
+    and says so. Download the official FA(2) XSD from crd.gov.pl once and point xsd_path at it
+    for an authoritative check before real submission."""
+    data = xml
+    if not data and path:
+        path = os.path.expanduser(path)
+        try:
+            data = open(path, encoding="utf-8").read()
+        except OSError as exc:
+            return {"ok": False, "error": str(exc), "path": path, "connector": CONNECTOR_ID}
+    if not data:
+        return {"ok": False, "error": "provide xml or path", "connector": CONNECTOR_ID}
+
+    xsd = os.path.expanduser(xsd_path) if xsd_path else os.getenv("KSEF_FA2_XSD", "")
+    if xsd:
+        try:
+            from lxml import etree  # type: ignore
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"lxml required for XSD validation: {exc}", "connector": CONNECTOR_ID}
+        try:
+            schema = etree.XMLSchema(etree.parse(xsd))
+            doc = etree.fromstring(data.encode("utf-8"))
+        except (etree.XMLSyntaxError, etree.XMLSchemaParseError, OSError) as exc:
+            return {"ok": False, "error": f"schema/XML load failed: {exc}", "connector": CONNECTOR_ID, "schema": xsd}
+        valid = bool(schema.validate(doc))
+        errors = [f"line {e.line}: {e.message}" for e in schema.error_log]
+        return {"ok": True, "connector": CONNECTOR_ID, "valid": valid, "checkedWith": "xsd",
+                "schema": xsd, "errors": errors, "errorCount": len(errors)}
+
+    errors, warnings = _structural_validate(data)
+    return {"ok": True, "connector": CONNECTOR_ID, "valid": not errors, "checkedWith": "structural",
+            "errors": errors, "warnings": warnings,
+            "note": "no FA(2) XSD given (set xsd_path or KSEF_FA2_XSD) — only structural/arithmetic checks ran"}
+
+
+# --- KSeF UPO (Urzędowe Poświadczenie Odbioru) — confirmation of a submitted invoice --------
+# After a successful send KSeF returns the UPO carrying the assigned KSeF number(s). KSeF 2.0
+# may hand it back as JSON or as the signed XML; this reads either, namespace-agnostic.
+_UPO_JSON_KEYS = {
+    "ksefNumber": ["ksefReferenceNumber", "ksefNumber", "referenceNumberKsef"],
+    "referenceNumber": ["referenceNumber", "elementReferenceNumber", "sessionReferenceNumber"],
+    "timestamp": ["acquisitionTimestamp", "receiveTimestamp", "timestamp", "invoicingDate"],
+    "invoiceNumber": ["invoiceNumber", "documentNumber"],
+    "invoiceHash": ["invoiceHash", "documentHash", "sha"],
+}
+_UPO_XML_TAGS = {
+    "ksefNumber": ["NumerKSeF", "NumerKSeFDokumentu", "KSeFReferenceNumber"],
+    "referenceNumber": ["NumerReferencyjny", "ElementReferencyjny", "NumerReferencyjnyEPP"],
+    "timestamp": ["DataPrzyjecia", "Czas", "DataWytworzeniaPoswiadczenia", "DataPrzeslania"],
+    "invoiceNumber": ["NumerFaktury", "P_2"],
+    "invoiceHash": ["SkrotDokumentu", "SkrotZlozenia"],
+    "nip": ["NIP", "Identyfikator"],
+}
+
+
+def _find_json(obj, keys: list[str]):
+    """Depth-first search of a decoded JSON object for the first matching key (case-insensitive)."""
+    want = {k.lower() for k in keys}
+    stack = [obj]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                if k.lower() in want and v not in (None, "", [], {}):
+                    return v
+            stack.extend(cur.values())
+        elif isinstance(cur, list):
+            stack.extend(cur)
+    return None
+
+
+def _parse_upo(data: str) -> dict[str, Any]:
+    """Extract the KSeF confirmation fields from a UPO (JSON or signed XML)."""
+    text = (data or "").strip()
+    fmt = "unknown"
+    out: dict[str, Any] = {"ksefNumber": None, "referenceNumber": None, "timestamp": None,
+                           "invoiceNumber": None, "invoiceHash": None, "nip": None}
+    if text.startswith("{") or text.startswith("["):
+        try:
+            obj = json.loads(text)
+            fmt = "json"
+            for field, keys in _UPO_JSON_KEYS.items():
+                out[field] = _find_json(obj, keys)
+            out["nip"] = out.get("nip") or _find_json(obj, ["nip", "identifier"])
+        except json.JSONDecodeError:
+            pass
+    if fmt == "unknown":
+        try:
+            root = _ET.fromstring(text.encode("utf-8") if isinstance(text, str) else text)
+            fmt = "xml"
+            for field, tags in _UPO_XML_TAGS.items():
+                for tag in tags:
+                    val = _txt(root, tag)
+                    if val:
+                        out[field] = val
+                        break
+        except _ET.ParseError:
+            return {"ok": False, "error": "UPO is neither valid JSON nor XML", "format": fmt}
+    out["nip"] = _norm_nip(out.get("nip")) if out.get("nip") else None
+    return {"ok": bool(out.get("ksefNumber") or out.get("referenceNumber")),
+            "connector": CONNECTOR_ID, "format": fmt, **out}
+
+
+@INVOICE.handler("ksef/query/upo", isolated=True,
+                 meta={"label": "Parse a KSeF UPO (confirmation) → KSeF number + timestamp", "cliAlias": "ksef-upo"})
+def ksef_upo(path: str = "", xml: str = "", text: str = "", output_path: str = "") -> dict[str, Any]:
+    """Parse a KSeF UPO (Urzędowe Poświadczenie Odbioru) from `path`/`xml`/`text` — JSON or
+    signed XML — into the assigned KSeF number, reference number, timestamp and invoice hash.
+    Optionally save the raw UPO to `output_path` (the durable proof a flow archives)."""
+    data = xml or text
+    if not data and path:
+        path = os.path.expanduser(path)
+        try:
+            data = open(path, encoding="utf-8").read()
+        except OSError as exc:
+            return {"ok": False, "error": str(exc), "path": path, "connector": CONNECTOR_ID}
+    if not data:
+        return {"ok": False, "error": "provide path, xml or text", "connector": CONNECTOR_ID}
+    parsed = _parse_upo(data)
+    if output_path and parsed.get("ok"):
+        out = os.path.expanduser(output_path)
+        os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
+        with open(out, "w", encoding="utf-8") as fh:
+            fh.write(data)
+        parsed["savedTo"] = out
+    if parsed.get("ok"):
+        _ledger("ksef_upo", ksefNumber=parsed.get("ksefNumber"),
+                referenceNumber=parsed.get("referenceNumber"), savedTo=parsed.get("savedTo"))
+    return parsed
+
+
+@INVOICE.handler("ledger/query/list", isolated=True,
+                 meta={"label": "Read the shared transaction ledger → recent rows + totals", "cliAlias": "ledger"})
+def ledger_list(path: str = "", limit: int = 50, event: str = "", connector: str = "",
+                since: float = 0.0) -> dict[str, Any]:
+    """Read the shared transaction ledger (`~/.urirun/ledger.jsonl`, or env URIRUN_LEDGER /
+    `path`) that the camera + invoice connectors auto-append to. Optional filters: `event`
+    (receipt|inspect|ingest|ksef_build|ksef_upo), `connector`, `since` (epoch). Returns the
+    most recent rows plus a summary: per-event counts, receipts total, invoices built + gross
+    sum, and the KSeF numbers confirmed."""
+    src = os.path.expanduser(path) if path else os.getenv(
+        "URIRUN_LEDGER", os.path.expanduser("~/.urirun/ledger.jsonl"))
+    rows: list[dict[str, Any]] = []
+    try:
+        with open(src, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event and rec.get("event") != event:
+                    continue
+                if connector and rec.get("connector") != connector:
+                    continue
+                if since and (rec.get("ts") or 0) < since:
+                    continue
+                rows.append(rec)
+    except OSError:
+        return {"ok": True, "connector": CONNECTOR_ID, "path": src, "exists": False,
+                "count": 0, "summary": {}, "rows": []}
+
+    counts: dict[str, int] = {}
+    gross_sum = 0.0
+    receipts_total = 0.0
+    ksef_numbers: list[str] = []
+    for rec in rows:
+        ev = rec.get("event", "?")
+        counts[ev] = counts.get(ev, 0) + 1
+        if ev == "ksef_build" and isinstance(rec.get("gross"), (int, float)):
+            gross_sum += rec["gross"]
+        if ev == "receipt" and isinstance(rec.get("total"), (int, float)):
+            receipts_total += rec["total"]
+        if ev == "ksef_upo" and rec.get("ksefNumber"):
+            ksef_numbers.append(rec["ksefNumber"])
+
+    summary = {"events": dict(sorted(counts.items())),
+               "receiptsTotal": round(receipts_total, 2),
+               "invoicesBuilt": counts.get("ksef_build", 0),
+               "grossBuilt": round(gross_sum, 2),
+               "ksefConfirmed": len(ksef_numbers), "ksefNumbers": ksef_numbers[-20:]}
+    recent = sorted(rows, key=lambda r: r.get("ts") or 0, reverse=True)[: max(1, int(limit))]
+    return {"ok": True, "connector": CONNECTOR_ID, "path": src, "exists": True,
+            "count": len(rows), "summary": summary, "rows": recent}
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -13,6 +13,7 @@ authors = [{ name = "if-uri" }]
 dependencies = ["urirun>=0.4.14"]
 
 [project.optional-dependencies]
+xsd = ["lxml>=5"]
 llm = ["litellm>=1.0"]
 test = ["pytest>=8"]
 
