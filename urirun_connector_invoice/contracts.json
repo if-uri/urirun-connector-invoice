@@ -1,0 +1,210 @@
+{
+  "contracts": {
+    "invoice://host/file/query/parse": {
+      "version": "v1",
+      "effect": "query",
+      "reversible": false,
+      "inp": { "path": "?str", "text": "?str", "use_llm": "?bool", "model": "?str" },
+      "out": {
+        "connector": "const:invoice", "kind": "const:invoice", "live": "bool",
+        "path": "str", "method": "str", "fields": "obj"
+      },
+      "errors": ["precondition-unmet", "degraded-backend"],
+      "examples": [
+        {
+          "payload": { "text": "FAKTURA VAT nr FV 1/2026\nNIP 7781422455\nRazem 123.00 PLN" },
+          "result": {
+            "ok": true, "connector": "invoice", "kind": "invoice", "live": false,
+            "path": "", "method": "regex", "fields": { "nip": "7781422455", "gross": 123.0 }
+          }
+        }
+      ]
+    },
+    "invoice://host/folder/query/audit": {
+      "version": "v1",
+      "effect": "query",
+      "reversible": false,
+      "inp": {
+        "root": "str", "extensions": "?str", "recursive": "?bool", "use_llm": "?bool",
+        "max_files": "?int", "output_csv": "?str", "model": "?str"
+      },
+      "out": {
+        "connector": "const:invoice", "kind": "const:audit", "live": "bool",
+        "root": "str", "invoices": "int", "parsed": "int", "totals": "obj",
+        "csv": "any", "rows": "list"
+      },
+      "errors": ["precondition-unmet", "degraded-backend"],
+      "examples": [
+        {
+          "payload": { "root": "/tmp/invoices" },
+          "result": {
+            "ok": true, "connector": "invoice", "kind": "audit", "live": false,
+            "root": "/tmp/invoices", "invoices": 0, "parsed": 0,
+            "totals": { "net": 0.0, "vat": 0.0, "gross": 0.0 }, "csv": null, "rows": []
+          }
+        }
+      ]
+    },
+    "invoice://host/ksef/folder/register": {
+      "version": "v1",
+      "effect": "command",
+      "reversible": false,
+      "inp": { "root": "str", "recursive": "?bool", "output_csv": "?str", "max_files": "?int" },
+      "out": {
+        "connector": "const:invoice", "kind": "const:register", "live": "bool",
+        "root": "str", "invoices": "int", "totals": "obj", "byRate": "obj",
+        "csv": "any", "rows": "list"
+      },
+      "errors": ["precondition-unmet", "degraded-backend"],
+      "examples": [
+        {
+          "payload": { "root": "/tmp/ksef" },
+          "result": {
+            "ok": true, "connector": "invoice", "kind": "register", "live": false,
+            "root": "/tmp/ksef", "invoices": 0,
+            "totals": { "net": 0.0, "vat": 0.0, "gross": 0.0 },
+            "byRate": {}, "csv": null, "rows": []
+          }
+        }
+      ]
+    },
+    "invoice://host/ksef/query/build": {
+      "version": "v1",
+      "effect": "query",
+      "reversible": false,
+      "inp": {
+        "draft_json": "?str", "text": "?str", "receipt_json": "?str", "vat_rate": "?num",
+        "seller": "?str", "buyer_nip": "?str", "number": "?str", "currency": "?str",
+        "output_path": "?str", "system_info": "?str", "created_at": "?str",
+        "sale_date": "?str", "seller_address": "?str", "buyer_address": "?str"
+      },
+      "out": {
+        "connector": "const:invoice", "kind": "const:invoice-xml", "live": "bool",
+        "formCode": "const:FA", "variant": "enum:2", "xml": "str",
+        "path": "any", "draft": "obj", "parsed": "obj"
+      },
+      "errors": ["precondition-unmet", "degraded-backend"],
+      "examples": [
+        {
+          "payload": { "receipt_json": "{\"total\": 10.0, \"nip\": \"7781422455\"}" },
+          "result": {
+            "ok": true, "connector": "invoice", "kind": "invoice-xml", "live": false,
+            "formCode": "FA", "variant": "2", "xml": "<Faktura/>",
+            "path": null, "draft": {}, "parsed": {}
+          }
+        }
+      ]
+    },
+    "invoice://host/ksef/query/parse": {
+      "version": "v1",
+      "effect": "query",
+      "reversible": false,
+      "inp": { "path": "?str", "xml": "?str" },
+      "out": {
+        "connector": "const:invoice", "kind": "const:invoice", "live": "bool",
+        "path": "str", "fields": "obj"
+      },
+      "errors": ["precondition-unmet", "degraded-backend"],
+      "examples": [
+        {
+          "payload": { "xml": "<Faktura><Fa><P_2>FV1</P_2></Fa></Faktura>" },
+          "result": {
+            "ok": true, "connector": "invoice", "kind": "invoice", "live": false,
+            "path": "", "fields": { "number": "FV1" }
+          }
+        }
+      ]
+    },
+    "invoice://host/ksef/query/upo": {
+      "version": "v1",
+      "effect": "query",
+      "reversible": false,
+      "inp": { "path": "?str", "xml": "?str", "text": "?str", "output_path": "?str" },
+      "out": {
+        "connector": "const:invoice", "kind": "const:upo", "live": "bool",
+        "format": "str", "ksefNumber": "any", "referenceNumber": "any",
+        "timestamp": "any", "invoiceNumber": "any", "invoiceHash": "any",
+        "nip": "any", "savedTo": "?str"
+      },
+      "errors": ["precondition-unmet", "degraded-backend"],
+      "examples": [
+        {
+          "payload": { "text": "{\"ksefReferenceNumber\":\"K-1\"}" },
+          "result": {
+            "ok": true, "connector": "invoice", "kind": "upo", "live": false,
+            "format": "json", "ksefNumber": "K-1", "referenceNumber": null,
+            "timestamp": null, "invoiceNumber": null, "invoiceHash": null, "nip": null
+          }
+        }
+      ]
+    },
+    "invoice://host/ksef/query/validate": {
+      "version": "v1",
+      "effect": "query",
+      "reversible": false,
+      "inp": { "xml": "?str", "path": "?str", "xsd_path": "?str" },
+      "out": {
+        "connector": "const:invoice", "kind": "const:validation", "live": "bool",
+        "valid": "bool", "checkedWith": "enum:structural|xsd", "errors": "list",
+        "warnings": "?list", "note": "?str", "schema": "?str", "errorCount": "?int"
+      },
+      "errors": ["precondition-unmet", "degraded-backend"],
+      "examples": [
+        {
+          "payload": { "xml": "<Faktura><Fa/></Faktura>" },
+          "result": {
+            "ok": true, "connector": "invoice", "kind": "validation", "live": false,
+            "valid": false, "checkedWith": "structural", "errors": [], "warnings": [],
+            "note": "no FA(2) XSD given"
+          }
+        }
+      ]
+    },
+    "invoice://host/ledger/query/list": {
+      "version": "v1",
+      "effect": "query",
+      "reversible": false,
+      "inp": { "path": "?str", "limit": "?int", "event": "?str", "connector": "?str", "since": "?num" },
+      "out": {
+        "connector": "const:invoice", "kind": "const:ledger", "live": "bool",
+        "path": "str", "exists": "bool", "count": "int", "summary": "obj", "rows": "list"
+      },
+      "errors": ["precondition-unmet", "degraded-backend"],
+      "examples": [
+        {
+          "payload": { "path": "/tmp/ledger.jsonl" },
+          "result": {
+            "ok": true, "connector": "invoice", "kind": "ledger", "live": false,
+            "path": "/tmp/ledger.jsonl", "exists": false, "count": 0,
+            "summary": {}, "rows": []
+          }
+        }
+      ]
+    },
+    "invoice://host/receipt/query/draft": {
+      "version": "v1",
+      "effect": "query",
+      "reversible": false,
+      "inp": {
+        "text": "?str", "receipt_json": "?str", "path": "?str", "vat_rate": "?num",
+        "seller": "?str", "buyer_nip": "?str", "number": "?str", "currency": "?str",
+        "use_llm": "?bool", "model": "?str"
+      },
+      "out": {
+        "connector": "const:invoice", "kind": "const:invoice-draft", "live": "bool",
+        "draft": "obj", "fields": "obj", "notes": "list"
+      },
+      "errors": ["precondition-unmet", "degraded-backend"],
+      "examples": [
+        {
+          "payload": { "receipt_json": "{\"total\": 10.0, \"nip\": \"7781422455\"}" },
+          "result": {
+            "ok": true, "connector": "invoice", "kind": "invoice-draft", "live": false,
+            "draft": {}, "fields": {}, "notes": []
+          }
+        }
+      ]
+    }
+  },
+  "wires": []
+}
