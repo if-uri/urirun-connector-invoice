@@ -296,8 +296,6 @@ def ksef_parse(path: str = "", xml: str = "") -> dict[str, Any]:
             "connector": CONNECTOR_ID, "kind": "invoice", "live": False, "path": path, "fields": fields}
 
 
-@INVOICE.handler("ksef/folder/register", isolated=True,
-                 meta={"label": "Aggregate KSeF XMLs into a VAT register (per-rate totals → JPK)", "cliAlias": "ksef-register"})
 def _ksef_parse_xml_row(dirpath: str, fn: str, seen: set) -> tuple[dict, dict] | None:
     res = ksef_parse(path=os.path.join(dirpath, fn))
     if not res.get("ok"):
@@ -328,6 +326,8 @@ def _ksef_update_totals(totals: dict, by_rate: dict, f: dict) -> None:
         slot["vat"] += amt.get("vat") or 0
 
 
+@INVOICE.handler("ksef/folder/register", isolated=True,
+                 meta={"label": "Aggregate KSeF XMLs into a VAT register (per-rate totals → JPK)", "cliAlias": "ksef-register"})
 def ksef_register(root: str = "", recursive: bool = True, output_csv: str = "", max_files: int = 5000) -> dict[str, Any]:
     """Parse every *.xml KSeF invoice under `root` into a VAT register: rows + net/VAT/gross
     totals broken down per VAT rate — the ewidencja a JPK_V7M is built from. Writes CSV if
@@ -815,8 +815,6 @@ def ksef_upo(path: str = "", xml: str = "", text: str = "", output_path: str = "
     return parsed
 
 
-@INVOICE.handler("ledger/query/list", isolated=True,
-                 meta={"label": "Read the shared transaction ledger → recent rows + totals", "cliAlias": "ledger"})
 def _read_ledger_rows(src: str, event: str, connector: str, since: float) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with open(src, encoding="utf-8") as fh:
@@ -861,6 +859,8 @@ def _summarize_ledger(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+@INVOICE.handler("ledger/query/list", isolated=True,
+                 meta={"label": "Read the shared transaction ledger → recent rows + totals", "cliAlias": "ledger"})
 def ledger_list(path: str = "", limit: int = 50, event: str = "", connector: str = "",
                 since: float = 0.0) -> dict[str, Any]:
     """Read the shared transaction ledger (`~/.urirun/ledger.jsonl`, or env URIRUN_LEDGER /

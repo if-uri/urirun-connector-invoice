@@ -1,4 +1,6 @@
 """Offline tests for the invoice connector: regex extraction, amount sanity, FA_VAT XML, register dedup."""
+import pytest
+
 import urirun_connector_invoice.core as c
 
 
@@ -176,7 +178,7 @@ def test_structural_validate_flags_arithmetic_and_missing():
 
 
 def test_xsd_validation_via_lxml_when_schema_given(tmp_path):
-    etree = __import__("importlib").import_module("lxml.etree")  # skip if lxml missing handled below
+    pytest.importorskip("lxml.etree")
     # a tiny schema that requires <Faktura><Fa><P_15/></Fa></Faktura> in the FA(2) namespace
     xsd = tmp_path / "mini.xsd"
     xsd.write_text(
